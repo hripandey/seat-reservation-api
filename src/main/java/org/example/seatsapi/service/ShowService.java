@@ -1,6 +1,5 @@
 package org.example.seatsapi.service;
 
-import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
 import org.example.seatsapi.dto.request.CreateShowRequest;
 import org.example.seatsapi.entity.Seat;
@@ -9,6 +8,7 @@ import org.example.seatsapi.enums.SeatStatus;
 import org.example.seatsapi.repository.SeatRepository;
 import org.example.seatsapi.repository.ShowRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
