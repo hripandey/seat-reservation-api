@@ -12,6 +12,7 @@ import org.example.seatsapi.enums.ReservationStatus;
 import org.example.seatsapi.enums.SeatStatus;
 import org.example.seatsapi.exception.IdempotencyKeyReuseException;
 import org.example.seatsapi.exception.SeatAlreadyTakenException;
+import org.example.seatsapi.exception.UserReservationLimitExceededException;
 import org.example.seatsapi.repository.ReservationRepository;
 import org.example.seatsapi.repository.ReservationSeatRepository;
 import org.example.seatsapi.repository.SeatRepository;
@@ -29,6 +30,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ReservationService {
 
+    private static final int MAX_SEATS_PER_USER_PER_SHOW = 4;
     private final ReservationRepository reservationRepository;
     private final ReservationSeatRepository reservationSeatRepository;
     private final SeatRepository seatRepository;
@@ -49,6 +51,7 @@ public class ReservationService {
          * Serialize requests using the same idempotency key.
          *
          * This lock exists only for the duration of this transaction.
+         * This lock protects same request being submitted concurrently.
          */
         String lockKey =
                 userId + ":" + showId + ":" + request.idempotencyKey();
@@ -73,13 +76,36 @@ public class ReservationService {
         }
 
         /*
+         * Check per-user reservation limit.
+         */
+
+        String userShowLockKey = "reservation-limit:" + userId + ":" + showId;
+        entityManager.createNativeQuery("SELECT pg_advisory_xact_lock(hashtextextended(:lockKey, 0))")
+                .setParameter("lockKey", userShowLockKey)
+                .getSingleResult();
+
+        long currActiveSeats = reservationSeatRepository.countActiveSeatsForUserAndShow(userId, showId);
+        if (currActiveSeats + requestedSeats.size() > MAX_SEATS_PER_USER_PER_SHOW) {
+            throw new UserReservationLimitExceededException(
+                    "User reservation limit of " + MAX_SEATS_PER_USER_PER_SHOW + " seats per show exceeded"
+            );
+        }
+
+        /*
          * Load the show.
          */
         Show show = showRepository.findById(showId).orElseThrow(() ->
                 new IllegalArgumentException("No show exists"));
 
 
+        /*
+         * Lock all requested seats.
+         */
         List<Seat> seats = seatRepository.findAndLockSeats(showId, requestedSeats);
+
+        /*
+         * Make sure every requested seat actually exists.
+         */
         if (seats.size() != requestedSeats.size()) {
             throw new IllegalArgumentException("One or more requested seats do not exist");
         }
@@ -91,11 +117,6 @@ public class ReservationService {
                 throw new SeatAlreadyTakenException("Seat " + seat.getSeatNumber() + " is already taken");
             }
         }
-
-        /*
-         * TODO:
-         * Check per-user reservation limit here.
-         */
 
         long amountPaise = show.getPricePaise() * seats.size();
 
@@ -111,6 +132,9 @@ public class ReservationService {
 
         Reservation savedReservation = reservationRepository.save(reservation);
 
+        /*
+         * Move seats from AVAILABLE -> HELD.
+         */
         for (Seat seat : seats) {
             seat.setStatus(SeatStatus.HELD);
             ReservationSeat reservationSeat = new ReservationSeat();
